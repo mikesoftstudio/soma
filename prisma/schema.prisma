@@ -1,0 +1,278 @@
+// Soma Messaging API — Prisma Schema
+// Run: npx prisma migrate dev --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+//  Users & API Keys
+// ─────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  password  String   // hashed
+  isActive  Boolean  @default(true)
+
+  apiKeys   ApiKey[]
+  emails    Email[]
+  smsMessages Sms[]
+  templates TemplateRecord[]
+  webhooks  Webhook[]
+  domains   Domain[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  name        String
+  keyHash     String    @unique   // bcrypt hash — never store plain text
+  prefix      String               // e.g. "sk_live_abc123" shown to user once
+  userId      String
+
+  permissions String[]  @default([]) // ["email:send","sms:send","template:read"]
+  rateLimit   Int       @default(1000) // requests per window
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  isActive    Boolean   @default(true)
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emails      Email[]
+  smsMessages Sms[]
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("api_keys")
+}
+
+// ─────────────────────────────────────────────
+//  Email
+// ─────────────────────────────────────────────
+
+model Email {
+  id          String      @id @default(cuid())
+  from        String
+  to          String[]
+  cc          String[]    @default([])
+  bcc         String[]    @default([])
+  replyTo     String?
+  subject     String
+  html        String?
+  text        String?
+  headers     Json?
+  attachments Json?       // serialised attachment metadata (not binaries)
+  tags        Json?       // key-value metadata from caller
+
+  status      EmailStatus @default(QUEUED)
+  attempts    Int         @default(0)
+  error       String?
+  messageId   String?     // SMTP Message-ID header
+  scheduledAt DateTime?   // future send support
+  sentAt      DateTime?
+
+  templateId  String?
+  template    TemplateRecord? @relation(fields: [templateId], references: [id])
+  apiKeyId    String?
+  apiKey      ApiKey?     @relation(fields: [apiKeyId], references: [id])
+  userId      String
+  user        User        @relation(fields: [userId], references: [id])
+
+  events      EmailEvent[]
+
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([apiKeyId])
+  @@map("emails")
+}
+
+enum EmailStatus {
+  QUEUED
+  SCHEDULED
+  SENDING
+  SENT
+  FAILED
+  BOUNCED
+  COMPLAINED
+}
+
+model EmailEvent {
+  id        String   @id @default(cuid())
+  emailId   String
+  email     Email    @relation(fields: [emailId], references: [id], onDelete: Cascade)
+  type      String   // "sent" | "bounced" | "failed" | "complained"
+  data      Json?
+  createdAt DateTime @default(now())
+
+  @@index([emailId])
+  @@map("email_events")
+}
+
+// ─────────────────────────────────────────────
+//  SMS
+// ─────────────────────────────────────────────
+
+model Sms {
+  id        String    @id @default(cuid())
+  to        String               // E.164 format: +12125551234
+  from      String?              // optional sender name / alias
+  body      String
+  carrier   SmsCarrier?          // deprecated: used in previous carrier gateway version
+  messageId String?              // Twilio message SID
+  status    SmsStatus @default(QUEUED)
+  attempts  Int       @default(0)
+  error     String?
+  sentAt    DateTime?
+  tags      Json?
+
+  templateId String?
+  template   TemplateRecord? @relation(fields: [templateId], references: [id])
+  apiKeyId  String?
+  apiKey    ApiKey?   @relation(fields: [apiKeyId], references: [id])
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([apiKeyId])
+  @@map("sms_messages")
+}
+
+enum SmsStatus {
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+}
+
+enum SmsCarrier {
+  ATT
+  TMOBILE
+  VERIZON
+  SPRINT
+  BOOST
+  CRICKET
+  METRO_PCS
+  US_CELLULAR
+  VIRGIN_MOBILE
+  TRACFONE
+  STRAIGHT_TALK
+  UNKNOWN
+}
+
+// ─────────────────────────────────────────────
+//  Templates
+// ─────────────────────────────────────────────
+
+model TemplateRecord {
+  id        String       @id @default(cuid())
+  name      String
+  type      TemplateType @default(EMAIL)
+  subject   String?      // for emails
+  html      String?      // Handlebars template
+  text      String?      // plain-text fallback / SMS body
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  emails    Email[]
+  smsMessages Sms[]
+
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@unique([userId, name])
+  @@map("templates")
+}
+
+enum TemplateType {
+  EMAIL
+  SMS
+}
+
+// ─────────────────────────────────────────────
+//  Webhooks
+// ─────────────────────────────────────────────
+
+model Webhook {
+  id        String        @id @default(cuid())
+  name      String
+  url       String
+  events    String[]      // ["email.sent","email.failed","sms.sent","sms.failed"]
+  secret    String        // used to sign the payload (HMAC-SHA256)
+  isActive  Boolean       @default(true)
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  deliveries WebhookDelivery[]
+
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([userId])
+  @@map("webhooks")
+}
+
+model WebhookDelivery {
+  id          String   @id @default(cuid())
+  webhookId   String
+  webhook     Webhook  @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  event       String
+  payload     Json
+  statusCode  Int?
+  response    String?
+  attempts    Int      @default(0)
+  success     Boolean  @default(false)
+  deliveredAt DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([webhookId])
+  @@map("webhook_deliveries")
+}
+
+// ─────────────────────────────────────────────
+//  Sending Domains (DKIM / SPF validation)
+// ─────────────────────────────────────────────
+
+model Domain {
+  id          String       @id @default(cuid())
+  domain      String       @unique
+  status      DomainStatus @default(PENDING)
+  dkimSelector String?
+  dkimPublicKey String?
+  dkimPrivateKey String?   // encrypted at rest
+  spfRecord   String?
+  dmarcRecord String?
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  verifiedAt  DateTime?
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([userId])
+  @@map("domains")
+}
+
+enum DomainStatus {
+  PENDING
+  VERIFIED
+  FAILED
+}
